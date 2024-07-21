@@ -1,0 +1,112 @@
+import pandas as pd
+import os
+from pathlib import Path
+from datetime import datetime
+import sys
+import backtrader as bt
+import pandas_ta as ta
+from datetime import datetime, timedelta
+ 
+# นำเข้าคลาส RotationalTradingStrategy
+from my_strategy_file_ok import RotationalTradingStrategy
+
+# เส้นทางไฟล์ที่มีคลาส RotationalTradingStrategy
+strategy_file_path = 'C:/Users/thanimwas/Downloads/Python/Auto Run'
+
+# เพิ่มเส้นทางไฟล์ไปยัง sys.path
+if strategy_file_path not in sys.path:
+    sys.path.append(strategy_file_path)
+
+# กำหนดตำแหน่งของไฟล์ข้อมูลและไฟล์ผลลัพธ์
+data_directory = 'C:/Users/thanimwas/Downloads/Python/Data'
+output_file_name = 'Buy.xlsx'
+
+# กำหนดวันที่สิ้นสุดเป็นวันปัจจุบัน
+end_date = datetime.now().strftime('%Y-%m-%d')
+
+# กำหนดวันที่เริ่มต้นเป็น 5 วันก่อนหน้าวันปัจจุบัน
+start_date = (datetime.now() - timedelta(days=4)).strftime('%Y-%m-%d')
+
+# สร้างช่วงวันที่ตั้งแต่ start_date ถึง end_date
+dates_to_process = pd.date_range(start=start_date, end=end_date).strftime('%Y-%m-%d').tolist()
+# ตั้งค่าเงินทุนเริ่มต้นและการตั้งค่า Stop Loss
+initial_cash = 100000  # เริ่มต้นด้วยเงิน 100,000 บาท
+#percent_stop_loss = 10  # Stop Loss -10%
+commission = 0.5  # ค่าคอมมิชชั่น 0.5%
+#open_position = 20  # ซื้อ 20 หุ้นในครั้งเดีย
+# บันทึกผลลัพธ์ลงในไฟล์ Excel
+# ฟังก์ชันสำหรับโหลดและทำความสะอาดข้อมูล
+def load_and_clean_data(file_path):
+    try:
+        df = pd.read_csv(file_path)
+        # แปลงข้อมูลให้เป็นตัวเลขและลบข้อมูลที่ไม่ครบถ้วน
+        columns_to_convert = ['High', 'Low', 'Close', 'Volume', 'P/E', 'P/BV', 'Yield%']
+        for column in columns_to_convert:
+            df[column] = pd.to_numeric(df[column], errors='coerce')
+        df.dropna(subset=columns_to_convert, inplace=True)
+        return df
+    except FileNotFoundError:
+        print(f"ไฟล์ {file_path} ไม่พบ")
+        return None
+
+def define_buying_conditions(df):
+    # ตัวอย่างการสร้างคอลัมน์ 'MovingAverage'
+    df['MovingAverage'] = df['Close'].rolling(window=20).mean()
+
+    # กำหนดเงื่อนไขการซื้อต่างๆ
+    SETNewHigh = df['High'] > df['Close'].rolling(window=15).max().shift(-1)
+    SETNewLow = df['Low'] < df['Close'].rolling(window=15).min().shift(-1)
+    SETGood = SETNewHigh != SETNewLow.shift(-1)
+    z52WeeksHigh = df['Close'].rolling(window=52, min_periods=1).max().shift(-1)
+    Buy1 = SETGood
+    Buy2 = df['High'] > z52WeeksHigh
+    Buy3 = df['Close'].ewm(span=20).mean() * df['Volume'] > 1000000
+    Buy4 = (df['P/E'] > 0) & (df['P/E'] < 6)
+    Buy5 = (df['P/BV'] > 0) & (df['P/BV'] < 1)
+    Buy6 = df['Yield%'] > 3
+
+    # รวมเงื่อนไขการซื้อทั้งหมดเข้าด้วยกัน
+    combined_buy_conditions = Buy4 & Buy5 & Buy6 # & Buy3 #& Buy2 & Buy3 &
+    # กำหนดเงื่อนไขการซื้อให้กับคอลัมน์ 'Buy'
+    df['Buy'] = combined_buy_conditions
+    #df['Buy'] = combined_buy_conditions & (df['Close'] > df['MovingAverage']) & (df['Volume'] > df['Volume'].rolling(window=20).mean())
+
+
+    return df
+# สร้าง DataFrame ใหม่เพื่อเก็บผลลัพธ์ทั้งหมด
+all_results = pd.DataFrame()
+
+# วนลูปประมวลผลไฟล์ CSV แต่ละไฟล์ตามวันที่
+for date in dates_to_process:
+    file_name = f'stocks_data_{date}.csv'
+    file_path = os.path.join(data_directory, file_name)
+    df = load_and_clean_data(file_path)
+    if df is not None:
+        df = define_buying_conditions(df)
+        # คำนวณ z52WeeksHigh และ Position Score
+        df['z52WeeksHigh'] = df['Close'].rolling(window=52*5).max()
+        df['ScoreHigh'] = df['High'] / df['z52WeeksHigh']
+        df['PositionScore'] = df['Buy'] * df['ScoreHigh']
+        # คัดเลือกหุ้นที่ต้องการซื้อตาม Position Score
+        stocks_to_buy = df[df['Buy']].copy()
+        stocks_to_buy.sort_values(by='PositionScore', ascending=False, inplace=True)
+        top_stocks = stocks_to_buy.nlargest(4, 'PositionScore')
+        # บันทึกข้อมูลหุ้นที่คัดเลือกลงในไฟล์ Excel
+        output_path = os.path.join(data_directory, f'top_stocks_{date}.xlsx')
+        #top_stocks.to_excel(output_path, index=False)
+        # เพิ่มข้อมูลที่ตรงกับเงื่อนไขการซื้อเข้าไปใน all_results
+        all_results = pd.concat([all_results, top_stocks])
+
+
+output_path = os.path.join(data_directory, output_file_name)
+all_results.to_excel(output_path, index=False)
+print(f"ผลลัพธ์ทั้งหมดได้ถูกบันทึกไว้ในไฟล์ {output_file_name}")
+# ตั้งค่า Backtrader และเริ่มการทดสอบกลยุทธ์
+if __name__ == '__main__':
+    cerebro = bt.Cerebro()
+    cerebro.addstrategy(RotationalTradingStrategy)
+    cerebro.broker.set_cash(initial_cash)
+    cerebro.broker.setcommission(commission=commission)
+
+    # รัน Cerebro
+    cerebro.run()
